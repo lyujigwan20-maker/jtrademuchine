@@ -1,0 +1,103 @@
+"""
+파일명: account_balance_check.py
+설명: 한국투자증권 OpenAPI 계좌 잔고 및 보유 종목 조회
+"""
+
+import sys
+from kis_query_utils import (
+    load_env_safely,
+    get_env_values,
+    request_access_token,
+    send_get_request
+)
+
+BALANCE_ENDPOINT = "/uapi/domestic-stock/v1/trading/inquire-balance"
+TR_ID_REAL = "TTTC8434R"
+TR_ID_DEMO = "VTTC8434R"
+
+def get_tr_id(is_paper: bool) -> str:
+    return TR_ID_DEMO if is_paper else TR_ID_REAL
+
+def inquire_balance(env_values: dict, access_token: str, is_paper: bool = True) -> dict:
+    tr_id = get_tr_id(is_paper)
+    
+    # 💡 완벽하게 수정된 국내주식 잔고조회 필수 파라미터입니다.
+    params = {
+        "CANO": env_values["account_no"],
+        "ACNT_PRDT_CD": env_values["product_code"],
+        "AFHR_FLPR_YN": "N",             
+        "OFL_YN": "",                    # ⬅️ 에러의 주범이었던 파라미터 (추가 완료)
+        "INQR_DVSN": "02",               
+        "UNPR_DVSN": "01",               
+        "FUND_STTL_ICLD_YN": "N",        
+        "FNCG_AMT_AUTO_RDPT_YN": "N",    
+        "PRCS_DVSN": "00",               
+        "CTX_AREA_FK100": "",            
+        "CTX_AREA_NK100": "",            
+    }
+    
+    return send_get_request(
+        endpoint=BALANCE_ENDPOINT,
+        tr_id=tr_id,
+        params=params,
+        app_key=env_values["app_key"],
+        app_secret=env_values["app_secret"],
+        access_token=access_token,
+        is_paper=is_paper
+    )
+
+if __name__ == "__main__":
+    print("========== 💰 내 계좌 잔고 조회 시작 ==========\n")
+    
+    load_env_safely("kis_key.env")
+    env_values = get_env_values()
+    
+    if not all([env_values["app_key"], env_values["app_secret"], env_values["account_no"], env_values["product_code"]]):
+        print("❌ [오류] 환경변수가 누락되었습니다. kis_key.env를 확인하세요.")
+        sys.exit(1)
+
+    IS_PAPER = True 
+    
+    try:
+        print("🔑 1. 토큰 확인 중...")
+        access_token = request_access_token(
+            app_key=env_values["app_key"], 
+            app_secret=env_values["app_secret"], 
+            is_paper=IS_PAPER
+        )
+
+        print("📥 2. 서버에 잔고 데이터 요청 중...\n")
+        result_data = inquire_balance(env_values, access_token, IS_PAPER)
+        
+        if result_data.get("rt_cd") != "0":
+            print(f"⚠️ [조회 거절] 사유: {result_data.get('msg1')}")
+            sys.exit(1)
+            
+        account_summary = result_data.get("output2", [{}])[0]
+        holdings = result_data.get("output1", [])
+        
+        print("📊 [계좌 총 요약]")
+        print(f" - 주문 가능 현금(예수금): {int(account_summary.get('prvs_rcdl_excc_amt', 0)):,}원")
+        print(f" - 주식 총 평가금액    : {int(account_summary.get('tot_evlu_amt', 0)):,}원")
+        print(f" - 주식 총 평가손익    : {int(account_summary.get('evlu_pfls_smtl_amt', 0)):,}원")
+        print("-" * 50)
+        
+        print(f"📝 [현재 보유 종목] (총 {len(holdings)}종목)")
+        if not holdings:
+            print(" 👉 현재 보유 중인 주식이 없습니다.")
+        else:
+            for item in holdings:
+                name = item.get('prdt_name')
+                qty = item.get('hldg_qty')
+                buy_price = int(float(item.get('pchs_avg_pric', 0))) 
+                current_price = int(item.get('prpr', 0))
+                profit_rate = item.get('evlu_pfls_rt')
+                
+                print(f" 🔹 {name} ({item.get('pdno')})")
+                print(f"    보유수량: {qty}주 | 매입단가: {buy_price:,}원")
+                print(f"    현재가격: {current_price:,}원 | 수익률: {profit_rate}%")
+
+    except Exception as e:
+        print(f"\n🚨 [시스템 에러 발생] 원인: {e}")
+
+    print("\n========== 조회 작업이 완료되었습니다 ==========")
